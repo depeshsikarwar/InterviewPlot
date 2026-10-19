@@ -1,0 +1,28 @@
+import jwt from 'jsonwebtoken';
+import { env } from '../config/env';
+
+export interface TokenPayload {
+  userId: string;
+  email: string;
+  role: string;
+}
+
+export function generateAccessToken(payload: TokenPayload): string {
+  return jwt.sign(payload, env.JWT_SECRET, {
+    expiresIn: '7d', // Consistent with app session
+  });
+}
+
+export function generateRefreshToken(payload: TokenPayload): string {
+  return jwt.sign(payload, env.REFRESH_TOKEN_SECRET, {
+    expiresIn: '30d',
+  });
+}
+
+export function verifyAccessToken(token: string): TokenPayload {
+  return jwt.verify(token, env.JWT_SECRET) as TokenPayload;
+}
+
+export function verifyRefreshToken(token: string): TokenPayload {
+  return jwt.verify(token, env.REFRESH_TOKEN_SECRET) as TokenPayload;
+}
