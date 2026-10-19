@@ -38,11 +38,7 @@ router.get('/overview', requireAuth, async (req: Request, res: Response) => {
           .sort((a, b) => a.proficiencyScore - b.proficiencyScore)
           .slice(0, 3)
           .map((s) => ({ name: s.skill.name, score: Math.round(s.proficiencyScore) }))
-      : [
-          { name: 'System Design & Trade-offs', score: 62 },
-          { name: 'STAR Behavioral Ownership', score: 68 },
-          { name: 'DSA: Stacks & Queues', score: 71 },
-        ];
+      : [];
 
     res.status(200).json({
       success: true,

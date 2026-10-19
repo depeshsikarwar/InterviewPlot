@@ -61,6 +61,12 @@ enum TestCaseType {
   HIDDEN
 }
 
+enum QuestionProgressStatus {
+  TODO
+  ATTEMPTED
+  SOLVED
+}
+
 model User {
   id               String           @id @default(uuid())
   email            String           @unique
@@ -84,6 +90,7 @@ model User {
   consents         UserConsent?
   refreshSessions  RefreshSession[]
   skillAssessments SkillAssessment[]
+  questionProgress UserQuestionProgress[]
 
   @@index([email])
 }
@@ -194,10 +201,14 @@ model QuestionBankItem {
   rubric         Json?               // Rubric criteria and score guide
   testCases      Json?               // Array of sample & hidden test cases
   hints          String[]            @default([])
+  companyTags    String[]            @default([])
+  sheetTags      String[]            @default([])
+  optimalComplexity Json?            // { time: "O(N)", space: "O(1)", note: "Hash Map / Two Pointers" }
   isVerified     Boolean             @default(true)
   createdAt      DateTime            @default(now())
 
   interviewQuestions InterviewQuestion[]
+  userProgress       UserQuestionProgress[]
 
   @@index([category, topic, difficulty])
 }
@@ -426,3 +437,23 @@ model RefreshSession {
   @@index([userId])
   @@index([tokenHash])
 }
+
+model UserQuestionProgress {
+  id                 String                 @id @default(uuid())
+  userId             String
+  user               User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  questionBankItemId String
+  questionBankItem   QuestionBankItem       @relation(fields: [questionBankItemId], references: [id], onDelete: Cascade)
+  status             QuestionProgressStatus @default(TODO)
+  isBookmarked       Boolean                @default(false)
+  lastScore          Float?
+  notes              String?                @db.Text
+  solvedAt           DateTime?
+  updatedAt          DateTime               @updatedAt
+  createdAt          DateTime               @default(now())
+
+  @@unique([userId, questionBankItemId])
+  @@index([userId, status])
+  @@index([userId, isBookmarked])
+}
+

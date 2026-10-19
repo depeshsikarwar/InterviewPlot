@@ -35,70 +35,338 @@ export interface EvaluationResult {
   };
 }
 
+export interface AdaptiveTurnInput {
+  interviewType: 'HR' | 'TECHNICAL' | 'CODING';
+  targetRole: string;
+  difficulty: string;
+  currentQuestionText: string;
+  candidateAnswerText: string;
+  conversationHistory: { role: 'interviewer' | 'candidate'; text: string }[];
+}
+
+export interface TurnEvaluation {
+  score: number; // 0 to 100
+  isCorrect: boolean;
+  feedback: string;
+  strengths: string[];
+  weaknesses: string[];
+  detectedTopics: string[];
+  isTrivialOrGreeting: boolean;
+  candidateExcerpt?: string;
+  starComponents?: {
+    situation: string;
+    task: string;
+    action: string;
+    result: string;
+  };
+}
+
 export class AIService {
   /**
-   * Generates next interview question or dynamic follow-up
+   * Generates initial question based on interview type, role, and difficulty
    */
-  async generateNextQuestion(context: HRQuestionContext): Promise<{ questionText: string; isFollowUp: boolean; category: string }> {
-    const history = context.conversationHistory;
-    const lastCandidateAnswer = history.filter((h) => h.role === 'candidate').slice(-1)[0]?.text;
+  async generateInitialQuestion(type: 'HR' | 'TECHNICAL' | 'CODING', targetRole: string, difficulty: string): Promise<{ questionText: string; category: string }> {
+    if (type === 'TECHNICAL') {
+      const technicalCatalog = [
+        {
+          questionText: 'Can you explain how a database index (such as a B-Tree or Hash index) works internally in PostgreSQL or MySQL, how it optimizes lookup queries, and what performance trade-off it introduces on write-heavy tables?',
+          category: 'Database Internals & Indexing',
+        },
+        {
+          questionText: 'In modern operating systems and backend services, what is the fundamental difference between a Process and a Thread? How does the OS handle context switches, and how do you prevent race conditions and deadlocks when threads access shared memory?',
+          category: 'Operating Systems & Concurrency',
+        },
+        {
+          questionText: `Walk me through how you would architect a scalable distributed rate limiter or URL shortening service for a ${targetRole} system handling 50,000 requests per second. What components, data stores, and caching strategies would you select?`,
+          category: 'System Design & Scalability',
+        },
+        {
+          questionText: 'Explain the transport layer differences between TCP and UDP. How does TCP guarantee reliability through three-way handshakes and sliding window congestion control, and in which real-time production systems would you choose UDP instead?',
+          category: 'Computer Networks & Protocols',
+        },
+        {
+          questionText: 'How does an event-driven asynchronous runtime (like Node.js or Go goroutines) handle tens of thousands of concurrent I/O requests without spawning a new OS thread for every single connection? How does it avoid blocking the event loop on CPU-bound work?',
+          category: 'Asynchronous I/O & Concurrency',
+        },
+      ];
+      const randomIdx = Math.floor(Math.random() * technicalCatalog.length);
+      return technicalCatalog[randomIdx];
+    }
 
-    // If candidate gave a short or non-answer like "hello", ask them directly to answer the question
-    if (lastCandidateAnswer && lastCandidateAnswer.trim().split(/\s+/).length < 8) {
+    // Default HR behavioral opener
+    const hrCatalog = [
+      {
+        questionText: `Tell me about a challenging software project or technical obstacle you encountered recently. Walk me through the situation, your individual technical contribution, and the measurable outcome.`,
+        category: 'STAR: Engineering Obstacle',
+      },
+      {
+        questionText: `Describe a scenario where you had a disagreement with a peer, senior engineer, or team lead regarding an architectural decision, library choice, or project timeline. How did you resolve it constructively?`,
+        category: 'STAR: Technical Conflict & Teamwork',
+      },
+      {
+        questionText: `Tell me about a time you had to deliver a critical feature or fix a production bug under severe time pressure or with ambiguous requirements. How did you prioritize tasks and ensure quality?`,
+        category: 'STAR: Time Management & Delivery',
+      },
+    ];
+    const hrIdx = Math.floor(Math.random() * hrCatalog.length);
+    return hrCatalog[hrIdx];
+  }
+
+  /**
+   * Evaluates the candidate's turn answer first before generating the follow-up
+   */
+  async evaluateTurnAnswer(
+    interviewType: 'HR' | 'TECHNICAL' | 'CODING',
+    questionText: string,
+    answerText: string,
+    targetRole: string
+  ): Promise<TurnEvaluation> {
+    const text = (answerText || '').trim();
+    const lower = text.toLowerCase();
+    const words = text.split(/\s+/).filter(Boolean);
+
+    // Trivial greeting / non-answer check
+    const normalized = lower.replace(/[^a-z0-9 ]/g, '').trim();
+    const trivialGreetings = [
+      'hello', 'hi', 'hey', 'test', 'testing', 'yes', 'no', 'ok', 'okay', 'sure',
+      'i dont know', "i don't know", 'nothing', 'skip', 'pass', 'idk', 'no idea',
+      'hello sir', 'hello maam', 'hello team', 'good morning', 'good afternoon', 'good evening',
+      'asdf', 'asdfghjk', 'qwerty', 'thanks', 'thank you', 'how are you', 'im ready', 'i am ready',
+      'hello interview pilot', 'hello there', 'hi there', 'hello world', 'fine', 'good'
+    ];
+
+    const isExplicitGreeting = trivialGreetings.includes(normalized) ||
+      trivialGreetings.some((g) => normalized === g || (normalized.startsWith(g + ' ') && words.length <= 6));
+
+    const isTrivial = words.length <= 4 || isExplicitGreeting || (words.length <= 8 && ['hello', 'hi', 'hey', 'test'].some((w) => lower.startsWith(w)));
+
+    if (isTrivial) {
       return {
-        questionText: `Your previous response was very brief. Could you elaborate with a specific real-world example from your academic or project experience where you faced a significant challenge?`,
-        isFollowUp: true,
-        category: 'Follow-up: Elaboration Request',
+        score: 0,
+        isCorrect: false,
+        isTrivialOrGreeting: true,
+        feedback: `CRITICAL REJECTION: Your submission ("${text}") is a casual greeting or non-answer. In competitive company and placement interviews, greetings or one-word replies receive an immediate zero. You must directly address the question with technical reasoning and evidence.`,
+        strengths: [],
+        weaknesses: [
+          'No answer provided to the question.',
+          'Missing technical concepts, architecture, or STAR structure.',
+          'Greetings are disqualified as valid interview responses.',
+        ],
+        detectedTopics: [],
+        candidateExcerpt: text,
       };
     }
 
-    // Dynamic follow-up if candidate missed quantitative results or ownership
-    if (lastCandidateAnswer && history.length >= 2 && history.length % 2 === 0 && !history[history.length - 2]?.text?.includes('follow-up')) {
-      const followUp = this.generateDynamicFollowUp(lastCandidateAnswer, context.targetRole);
-      if (followUp) {
-        return {
-          questionText: followUp,
-          isFollowUp: true,
-          category: 'Behavioral Follow-up',
-        };
+    // Detect technical keywords
+    const techDictionary: Record<string, string[]> = {
+      'Redis & In-Memory Caching': ['redis', 'memcached', 'cache', 'caching', 'ttl', 'lru', 'cache stampede', 'cache-aside', 'write-through'],
+      'PostgreSQL & Database Internals': ['postgres', 'postgresql', 'mysql', 'sql', 'index', 'indexes', 'b-tree', 'btree', 'hash index', 'foreign key', 'acid', 'transaction', 'wal', 'vacuum'],
+      'Microservices & Distributed Systems': ['microservice', 'microservices', 'rpc', 'grpc', 'rest', 'api gateway', 'distributed', 'saga', 'idempotent', 'idempotency', 'two-phase commit', 'circuit breaker'],
+      'Operating Systems & Concurrency': ['thread', 'threads', 'process', 'processes', 'concurrency', 'multithreading', 'mutex', 'semaphore', 'deadlock', 'race condition', 'lock', 'atomic', 'context switch'],
+      'Asynchronous Runtimes': ['node', 'nodejs', 'event loop', 'libuv', 'v8', 'async', 'await', 'promise', 'callback', 'goroutine', 'channel'],
+      'Frontend & State Management': ['react', 'vue', 'angular', 'virtual dom', 'dom', 'redux', 're-render', 'hook', 'useeffect', 'state management'],
+      'Message Queues & Event Streaming': ['kafka', 'rabbitmq', 'sqs', 'pub/sub', 'pubsub', 'message queue', 'consumer group', 'partition'],
+      'Containers & Infrastructure': ['docker', 'kubernetes', 'k8s', 'container', 'ci/cd', 'nginx', 'load balancer', 'reverse proxy', 'aws', 's3', 'cloud'],
+      'Networking Protocols': ['tcp', 'udp', 'http', 'https', 'http/2', 'http/3', 'websocket', 'dns', 'tls', 'ssl', 'three-way handshake', 'sliding window'],
+      'Algorithms & Data Structures': ['hash map', 'hashmap', 'binary search', 'dynamic programming', 'tree', 'graph', 'dfs', 'bfs', 'stack', 'queue', 'heap', 'two pointers', 'o(1)', 'o(n)', 'o(log n)'],
+    };
+
+    const detectedTopics: string[] = [];
+    for (const [topicName, kwList] of Object.entries(techDictionary)) {
+      if (kwList.some((kw) => lower.includes(kw))) {
+        detectedTopics.push(topicName);
       }
     }
 
-    // Comprehensive Question Sequence
-    const questionCatalog = [
-      { text: `Tell me about a challenging technical or teamwork obstacle you encountered in a recent software project. What was the situation, what action did you personally lead, and what was the outcome?`, category: 'STAR: Conflict & Obstacles' },
-      { text: `Describe a situation where you had a disagreement with a team member, peer, or mentor about a technical choice or project direction. How did you resolve it constructively?`, category: 'STAR: Teamwork & Conflict' },
-      { text: `Tell me about a time you worked on a project with a very tight deadline or ambiguous requirements. How did you prioritize tasks and ensure delivery?`, category: 'STAR: Time Management & Delivery' },
-      { text: `Can you share an instance where something you built failed in production or during testing? How did you debug the root cause and prevent it from recurring?`, category: 'STAR: Failure & Accountability' },
-      { text: `What motivates you specifically about working as a ${context.targetRole}, and what technical area are you actively learning right now?`, category: 'Career Motivation & Growth' },
-    ];
+    // Extract excerpt (sentence with substance)
+    const sentences = text.match(/[^.!?]+[.!?]+/g) || [text];
+    const candidateExcerpt = (sentences.find((s) => s.trim().length > 25) || text).trim();
 
-    const questionIndex = Math.floor(history.length / 2) % questionCatalog.length;
-    const selected = questionCatalog[questionIndex];
+    if (interviewType === 'TECHNICAL') {
+      const evalTech = await this.evaluateTechnicalAnswer(questionText, answerText, targetRole);
+      return {
+        score: evalTech.score,
+        isCorrect: evalTech.score >= 60,
+        isTrivialOrGreeting: false,
+        feedback: evalTech.feedback,
+        strengths: evalTech.strengths,
+        weaknesses: evalTech.weaknesses,
+        detectedTopics,
+        candidateExcerpt: candidateExcerpt.slice(0, 120),
+      };
+    } else {
+      const evalHR = await this.evaluateHRAnswer(questionText, answerText, targetRole);
+      return {
+        score: evalHR.overallScore,
+        isCorrect: evalHR.overallScore >= 60,
+        isTrivialOrGreeting: false,
+        feedback: evalHR.overallScore >= 75
+          ? 'Strong STAR behavioral answer demonstrating clear individual technical ownership and measurable outcomes.'
+          : 'Answer provided but requires more quantitative metrics and specific technical details.',
+        strengths: evalHR.strengths,
+        weaknesses: evalHR.weaknesses,
+        detectedTopics,
+        candidateExcerpt: candidateExcerpt.slice(0, 120),
+        starComponents: evalHR.starBreakdown,
+      };
+    }
+  }
 
+  /**
+   * Generates dynamic, bespoke follow-up question based directly on candidate's answer and evaluation.
+   * NEVER gives the same static question sequence to all candidates.
+   */
+  async generateAdaptiveTurn(
+    input: AdaptiveTurnInput,
+    evaluation: TurnEvaluation
+  ): Promise<{ questionText: string; isFollowUp: boolean; category: string }> {
+    const { interviewType, currentQuestionText, candidateAnswerText } = input;
+    const lower = candidateAnswerText.toLowerCase();
+
+    // 1. If candidate gave a greeting or non-answer, firmly demand an actual technical answer
+    if (evaluation.isTrivialOrGreeting || evaluation.score === 0) {
+      return {
+        questionText: `Your response was a casual placeholder rather than a substantive answer. In this interview, you are evaluated strictly on engineering logic. Let's restart: ${currentQuestionText}`,
+        isFollowUp: true,
+        category: 'Interviewer Redirection',
+      };
+    }
+
+    // 2. TECHNICAL INTERVIEW ADAPTIVE FOLLOW-UPS
+    if (interviewType === 'TECHNICAL') {
+      if (lower.includes('redis') || lower.includes('cache')) {
+        return {
+          questionText: `You mentioned utilizing caching. How do you structure cache keys and handle cache invalidation when underlying records mutate? In a high-traffic production spike, what strategy would you adopt to prevent a Cache Stampede or Thundering Herd problem on your primary database?`,
+          isFollowUp: true,
+          category: 'Technical Follow-up: Caching & Invalidation',
+        };
+      }
+
+      if (lower.includes('postgres') || lower.includes('mysql') || lower.includes('index') || lower.includes('b-tree') || lower.includes('sql')) {
+        return {
+          questionText: `You discussed database indexing. Can you explain the internal structure of a B-Tree index, why the order of columns in a composite index is critical, and what write amplification penalty indexes introduce during high-throughput ingestion?`,
+          isFollowUp: true,
+          category: 'Technical Follow-up: Database Internals',
+        };
+      }
+
+      if (lower.includes('microservice') || lower.includes('rest') || lower.includes('grpc') || lower.includes('distributed')) {
+        return {
+          questionText: `You proposed decomposing the system into microservices. How would you ensure data consistency across distributed boundaries without incurring distributed lock contention? How do you implement idempotency and handle cascading network timeouts?`,
+          isFollowUp: true,
+          category: 'Technical Follow-up: Distributed Consistency',
+        };
+      }
+
+      if (lower.includes('thread') || lower.includes('concurrency') || lower.includes('mutex') || lower.includes('lock')) {
+        return {
+          questionText: `You mentioned concurrency and multi-threading. What are the four Coffman conditions required for a deadlock to occur, and how would you design your resource locking hierarchy or utilize lock-free atomic primitives to eliminate deadlock risks?`,
+          isFollowUp: true,
+          category: 'Technical Follow-up: Concurrency & Deadlocks',
+        };
+      }
+
+      if (lower.includes('kafka') || lower.includes('queue') || lower.includes('pub/sub') || lower.includes('message')) {
+        return {
+          questionText: `You highlighted using Kafka or message queues for asynchronous decoupling. How do you configure partition keys to guarantee strict message ordering, and how does your consumer architecture handle rebalancing and poison-pill messages?`,
+          isFollowUp: true,
+          category: 'Technical Follow-up: Event Streaming & Queues',
+        };
+      }
+
+      if (lower.includes('node') || lower.includes('event loop') || lower.includes('async')) {
+        return {
+          questionText: `You described using Node.js for asynchronous I/O. Can you explain how libuv and the V8 event loop coordinate microtasks and macrotasks, and how you ensure a CPU-intensive computation does not block the main thread from serving incoming HTTP traffic?`,
+          isFollowUp: true,
+          category: 'Technical Follow-up: Asynchronous Runtimes',
+        };
+      }
+
+      if (lower.includes('react') || lower.includes('frontend') || lower.includes('state')) {
+        return {
+          questionText: `You brought up managing the UI state with React. How do you measure and prevent unnecessary component tree re-renders, and how would you architect real-time state synchronization when handling high-frequency WebSocket streams?`,
+          isFollowUp: true,
+          category: 'Technical Follow-up: Frontend Architecture',
+        };
+      }
+
+      if (lower.includes('docker') || lower.includes('kubernetes') || lower.includes('container')) {
+        return {
+          questionText: `You mentioned containerization with Docker and Kubernetes. How do you manage secrets, zero-downtime rolling updates, and persistent volume state across pod eviction and cluster upgrades?`,
+          isFollowUp: true,
+          category: 'Technical Follow-up: DevOps & Containers',
+        };
+      }
+
+      // If answer was brief or lacked complexity analysis
+      if (evaluation.score < 60) {
+        return {
+          questionText: `You gave a general high-level overview. Could you dive deeper into the operational trade-offs, specifically analyzing the time and space complexity, and how your design would behave if traffic scales by 10x?`,
+          isFollowUp: true,
+          category: 'Technical Follow-up: Complexity & Scaling',
+        };
+      }
+
+      // Contextual quote probe
+      const quote = evaluation.candidateExcerpt || 'the architecture you described';
+      return {
+        questionText: `In your explanation, you emphasized "${quote}". Could you walk me through the edge cases and failure modes of that approach? What telemetry or metrics would you monitor in production to detect degradation early?`,
+        isFollowUp: true,
+        category: 'Technical Follow-up: Production Resiliency',
+      };
+    }
+
+    // 3. HR BEHAVIORAL INTERVIEW ADAPTIVE FOLLOW-UPS
+    const iMatches = (lower.match(/\bi\b|\bmy\b|\bmine\b/g) || []).length;
+    const weMatches = (lower.match(/\bwe\b|\bour\b/g) || []).length;
+
+    // Check if quantitative results are missing
+    if (!lower.match(/\d+[%k]|improved|reduced|decreased|latency|metrics|scale|users|throughput|hours|days/i)) {
+      return {
+        questionText: `You described the situation well. Could you quantify the business or engineering impact of your solution? What concrete metrics (e.g. latency reduction, uptime, user adoption, or time saved) prove the success of your effort?`,
+        isFollowUp: true,
+        category: 'STAR Follow-up: Quantifiable Impact',
+      };
+    }
+
+    // Check if personal ownership was vague
+    if (weMatches > 3 && iMatches < 2) {
+      return {
+        questionText: `You highlighted what the team achieved as a group. What specific technical decisions, architecture designs, or code implementations were directly owned by you personally when difficulties arose?`,
+        isFollowUp: true,
+        category: 'STAR Follow-up: Personal Technical Ownership',
+      };
+    }
+
+    // High scoring answer -> push for reflection / leadership
+    const quote = evaluation.candidateExcerpt || 'your described solution';
     return {
-      questionText: selected.text,
-      isFollowUp: false,
-      category: selected.category,
+      questionText: `That was a clear breakdown. Reflecting on "${quote}" with the engineering experience you have today, what technical or procedural choice would you do differently if you had to start that project over?`,
+      isFollowUp: true,
+      category: 'STAR Follow-up: Retrospective & Maturity',
     };
   }
 
-  private generateDynamicFollowUp(answer: string, role: string): string | null {
-    const lower = answer.toLowerCase();
+  /**
+   * Generates next interview question or dynamic follow-up (backward-compatible)
+   */
+  async generateNextQuestion(context: HRQuestionContext): Promise<{ questionText: string; isFollowUp: boolean; category: string }> {
+    const history = context.conversationHistory;
+    const lastCandidateAnswer = history.filter((h) => h.role === 'candidate').slice(-1)[0]?.text || '';
+    const lastQuestion = history.filter((h) => h.role === 'interviewer').slice(-1)[0]?.text || '';
 
-    // Check if quantitative results are missing
-    if (!lower.match(/\d+[%k]|improved|reduced|decreased|latency|metrics|scale|users|throughput/i)) {
-      return `That gives good context. Could you quantify the impact of your actions? What measurable results, performance numbers, or user feedback resulted from your solution?`;
-    }
-
-    // Check if personal ownership is vague
-    const iMatches = (lower.match(/\bi\b|\bmy\b|\bmine\b/g) || []).length;
-    const weMatches = (lower.match(/\bwe\b|\bour\b/g) || []).length;
-    if (weMatches > 3 && iMatches < 2) {
-      return `You mentioned what the group accomplished as a whole. What specific architectural or implementation decisions did you individually own and execute?`;
-    }
-
-    return null;
+    const turnEval = await this.evaluateTurnAnswer('HR', lastQuestion, lastCandidateAnswer, context.targetRole);
+    return this.generateAdaptiveTurn(
+      {
+        interviewType: 'HR',
+        targetRole: context.targetRole,
+        difficulty: context.difficulty,
+        currentQuestionText: lastQuestion,
+        candidateAnswerText: lastCandidateAnswer,
+        conversationHistory: history,
+      },
+      turnEval
+    );
   }
 
   /**
@@ -107,31 +375,43 @@ export class AIService {
    * or answers under 15 words receive strict failing scores (0-15%).
    */
   async evaluateHRAnswer(question: string, answer: string, targetRole: string): Promise<EvaluationResult> {
-    const text = answer.trim();
+    const text = (answer || '').trim();
     const lower = text.toLowerCase();
     const words = text.split(/\s+/).filter(Boolean);
 
     // ==========================================
     // 1. Trivial / Non-Answer / Greeting Check
     // ==========================================
-    const trivialGreetings = ['hello', 'hi', 'hey', 'test', 'yes', 'no', 'ok', 'okay', 'i dont know', "i don't know", 'nothing', 'skip'];
-    const isTrivial = words.length <= 4 || trivialGreetings.includes(lower.replace(/[^a-z ]/g, '').trim());
+    const normalized = lower.replace(/[^a-z0-9 ]/g, '').trim();
+    const trivialGreetings = [
+      'hello', 'hi', 'hey', 'test', 'testing', 'yes', 'no', 'ok', 'okay', 'sure',
+      'i dont know', "i don't know", 'nothing', 'skip', 'pass', 'idk', 'no idea',
+      'hello sir', 'hello maam', 'hello team', 'good morning', 'good afternoon', 'good evening',
+      'asdf', 'asdfghjk', 'qwerty', 'thanks', 'thank you', 'how are you', 'im ready', 'i am ready',
+      'hello interview pilot', 'hello there', 'hi there', 'hello world'
+    ];
+
+    const isExplicitGreeting = trivialGreetings.includes(normalized) ||
+      trivialGreetings.some((g) => normalized === g || normalized.startsWith(g + ' ') && words.length <= 6);
+
+    const isTrivial = words.length <= 4 || isExplicitGreeting || (words.length <= 10 && ['hello', 'hi', 'hey', 'test'].some((w) => lower.startsWith(w)));
 
     if (isTrivial) {
       return {
-        overallScore: Math.min(10, words.length * 2), // 0 to 8 out of 100!
-        relevanceScore: 1.0,
-        structureScore: 1.0,
-        specificityScore: 1.0,
-        ownershipScore: 1.0,
-        resultsScore: 1.0,
-        strengths: ['Candidate acknowledged the prompt.'],
+        overallScore: 0, // Strict zero for greetings and non-answers
+        relevanceScore: 0.0,
+        structureScore: 0.0,
+        specificityScore: 0.0,
+        ownershipScore: 0.0,
+        resultsScore: 0.0,
+        strengths: [],
         weaknesses: [
-          `The response ("${text}") is a brief greeting/placeholder with zero substantive content.`,
-          'In a placement interview, questions require structured answers describing a real project or situation using the STAR framework.',
-          'Missing Situation: Describe the project, company, or course context.',
-          'Missing Action: Describe the exact steps you personally took.',
-          'Missing Result: Conclude with measurable impact or key lessons learned.',
+          `CRITICAL NON-ANSWER: Your response ("${text}") is only a casual greeting or placeholder.`,
+          'In a real placement or technical interview, greetings do NOT count as answers.',
+          'You must directly address the question using structured explanation (e.g. STAR: Situation, Task, Action, Result).',
+          'Missing Situation: Describe the exact project, role, or challenge.',
+          'Missing Action: Detail the engineering steps you took.',
+          'Missing Result: Quantify the outcome and impact.',
         ],
         evidenceQuotes: [text],
         modelAnswerExample: `When working on our college portal project, the database crashed under concurrent login loads of 500 users (Situation). My task was to diagnose the bottleneck and stabilize the auth system within 48 hours (Task). I analyzed PostgreSQL slow query logs, identified unindexed user lookups, added composite B-Tree indexes, and configured Redis connection pooling (Action). As a result, response times dropped by 72% and subsequent peak loads operated with 100% uptime (Result).`,
@@ -149,7 +429,7 @@ export class AIService {
           },
         ],
         starBreakdown: {
-          situation: 'Not provided in response.',
+          situation: 'Not provided (greeting only).',
           task: 'Not provided in response.',
           action: 'Not provided in response.',
           result: 'Not provided in response.',
@@ -162,7 +442,7 @@ export class AIService {
     // ==========================================
     if (words.length < 25) {
       return {
-        overallScore: 28,
+        overallScore: 20,
         relevanceScore: 2.0,
         structureScore: 1.5,
         specificityScore: 1.5,
@@ -336,30 +616,45 @@ export class AIService {
     weaknesses: string[];
     revisionTopics: string[];
   }> {
-    const text = answer.trim();
+    const text = (answer || '').trim();
     const lower = text.toLowerCase();
     const words = text.split(/\s+/).filter(Boolean);
 
     // Trivial greeting / non-answer check
-    if (words.length <= 4 || ['hello', 'hi', 'test', 'yes', 'no'].includes(lower.replace(/[^a-z]/g, ''))) {
+    const normalized = lower.replace(/[^a-z0-9 ]/g, '').trim();
+    const trivialGreetings = [
+      'hello', 'hi', 'hey', 'test', 'testing', 'yes', 'no', 'ok', 'okay', 'sure',
+      'i dont know', "i don't know", 'nothing', 'skip', 'pass', 'idk', 'no idea',
+      'hello sir', 'hello maam', 'hello team', 'good morning', 'good afternoon', 'good evening',
+      'asdf', 'asdfghjk', 'qwerty', 'thanks', 'thank you', 'how are you', 'im ready', 'i am ready',
+      'hello interview pilot', 'hello there', 'hi there', 'hello world'
+    ];
+
+    const isExplicitGreeting = trivialGreetings.includes(normalized) ||
+      trivialGreetings.some((g) => normalized === g || normalized.startsWith(g + ' ') && words.length <= 6);
+
+    const isTrivial = words.length <= 4 || isExplicitGreeting || (words.length <= 10 && ['hello', 'hi', 'hey', 'test'].some((w) => lower.startsWith(w)));
+
+    if (isTrivial) {
       return {
-        score: 5,
-        feedback: `Your response ("${text}") is a brief greeting with no technical reasoning. You must explain the underlying computer science concepts.`,
+        score: 0,
+        feedback: `CRITICAL REJECTION: Your response ("${text}") is only a casual greeting or non-answer. In a technical placement interview, you must directly explain the engineering concepts, internal data structures, and trade-offs. Zero points awarded.`,
         strengths: [],
         weaknesses: [
-          'No technical explanation provided.',
-          'Missing analysis of performance, memory, or architectural trade-offs.',
+          'No technical explanation or architecture described.',
+          'Missing analysis of performance, memory, time complexity, or system trade-offs.',
+          'Greetings and placeholder inputs are not considered valid answers.',
         ],
-        revisionTopics: [topic, 'Fundamental CS Concepts'],
+        revisionTopics: [topic, 'Fundamental CS Concepts & Core Algorithms'],
       };
     }
 
     if (words.length < 20) {
       return {
-        score: 25,
-        feedback: 'The response is too brief. Technical interviews require explaining mechanisms, complexities, and trade-offs.',
-        strengths: ['Identified the general subject.'],
-        weaknesses: ['Add detailed explanations of algorithmic complexity and failure modes.'],
+        score: 20,
+        feedback: 'The response is too brief. Technical interviews require explaining mechanisms, complexities, and trade-offs in depth.',
+        strengths: ['Addressed the general topic.'],
+        weaknesses: ['Add detailed explanations of algorithmic complexity, data structures, and trade-offs.'],
         revisionTopics: [topic],
       };
     }
@@ -493,6 +788,306 @@ export class AIService {
             'Take 1 full voice-enabled HR behavioral interview',
           ],
         },
+      ],
+    };
+  }
+
+  /**
+   * AlgoExpert-style AI Code Quality & Big-O Complexity Analysis
+   */
+  async analyzeCodeQualityAndComplexity(params: {
+    code: string;
+    language: string;
+    problemTitle?: string;
+    problemPrompt?: string;
+  }) {
+    const { code, language } = params;
+    const cleanCode = code.trim();
+
+    if (!cleanCode || cleanCode.length < 15) {
+      return {
+        timeComplexity: 'Unknown',
+        spaceComplexity: 'Unknown',
+        qualityScore: 10,
+        verdict: 'Incomplete / Empty Code Snippet',
+        strengths: [],
+        antiPatterns: ['Snippet too brief to analyze execution complexity'],
+        edgeCasesHandled: [],
+        edgeCasesMissing: ['Null / empty input validation', 'Single element handling', 'Bounds checking'],
+        refactoringSuggestions: ['Provide a full solution function before running Big-O complexity analysis.'],
+      };
+    }
+
+    // Heuristic syntax & complexity detection
+    let timeComplexity = 'O(N)';
+    let spaceComplexity = 'O(1)';
+    let timeComplexityRationale = 'Single linear traversal through the data collection.';
+    let spaceComplexityRationale = 'Constant auxiliary memory with only primitive pointer/variable allocations.';
+
+    // Check for nested loops
+    const forLoopMatches = (cleanCode.match(/\bfor\b|\bwhile\b/g) || []).length;
+    const hasNestedLoops = /(for|while)[^{}\n]*\{[^}]*(for|while)|for\s+.*:\s*\n\s+.*for\s+/s.test(cleanCode);
+    const hasSorting = /\.sort\(|sorted\(|std::sort|Arrays\.sort/i.test(cleanCode);
+    const hasBinarySearch = /(left\s*<=\s*right|low\s*<=\s*high|mid\s*=\s*)/i.test(cleanCode);
+    const hasRecursion = params.problemTitle ? new RegExp(`\\b${params.problemTitle.replace(/[^a-zA-Z]/g, '')}\\b`).test(cleanCode) : false;
+
+    if (hasNestedLoops || forLoopMatches >= 2 && !hasBinarySearch) {
+      timeComplexity = 'O(N²)';
+      timeComplexityRationale = 'Nested iteration detected across elements, scaling quadratically with input size N.';
+    } else if (hasSorting) {
+      timeComplexity = 'O(N log N)';
+      timeComplexityRationale = 'Comparison-based sorting routine dominates execution time.';
+    } else if (hasBinarySearch) {
+      timeComplexity = 'O(log N)';
+      timeComplexityRationale = 'Search space is halved on each iteration via binary partition.';
+    } else if (forLoopMatches === 0 && !hasRecursion) {
+      timeComplexity = 'O(1)';
+      timeComplexityRationale = 'Direct index arithmetic or constant-time operations without iterative looping.';
+    }
+
+    // Auxiliary Space Analysis
+    const hasHashMap = /Map|Set|dict\(|\blookup\b|\bhash\b|\bmap\b|unordered_map|HashMap|HashSet|\{\}/i.test(cleanCode);
+    const hasStackQueue = /stack|queue|deque|Vector|ArrayList|\[\]/i.test(cleanCode) && (cleanCode.includes('.push(') || cleanCode.includes('.append('));
+
+    if (hasHashMap || hasStackQueue) {
+      spaceComplexity = 'O(N)';
+      spaceComplexityRationale = 'Auxiliary data structure (hash map / frequency table / stack) dynamically stores up to N elements.';
+    }
+
+    // Edge Cases Auditing
+    const edgeCasesHandled: string[] = [];
+    const edgeCasesMissing: string[] = [];
+
+    if (/empty|\.length\s*===?\s*0|len\(.*\)\s*==\s*0|null|undefined|!nums|!s/i.test(cleanCode)) {
+      edgeCasesHandled.push('Guards against empty, null, or zero-length inputs');
+    } else {
+      edgeCasesMissing.push('Zero-length or null input handling');
+    }
+
+    if (/length\s*===?\s*1|len\(.*\)\s*==\s*1/i.test(cleanCode)) {
+      edgeCasesHandled.push('Explicit single-element base case condition');
+    } else {
+      edgeCasesMissing.push('Single element edge case verification');
+    }
+
+    if (/negative|diff\s*<\s*0|< 0/i.test(cleanCode)) {
+      edgeCasesHandled.push('Negative numerical value or decrement boundaries handled');
+    }
+
+    // Code Quality calculation
+    let qualityScore = 75;
+    const strengths: string[] = [];
+    const antiPatterns: string[] = [];
+    const refactoringSuggestions: string[] = [];
+
+    if (timeComplexity === 'O(N)' || timeComplexity === 'O(log N)') {
+      qualityScore += 15;
+      strengths.push(`Optimal time complexity achieved (${timeComplexity}).`);
+    } else if (timeComplexity === 'O(N²)') {
+      qualityScore -= 15;
+      antiPatterns.push('Quadratic time complexity O(N²) may cause Time Limit Exceeded (TLE) on large test inputs.');
+      refactoringSuggestions.push('Consider trading auxiliary space using a Hash Map or Two Pointers to reduce time to O(N).');
+    }
+
+    if (spaceComplexity === 'O(1)') {
+      qualityScore += 10;
+      strengths.push('In-place memory utilization without additional array allocation.');
+    }
+
+    if (cleanCode.includes('//') || cleanCode.includes('#')) {
+      strengths.push('Good inline code documentation explaining algorithm steps.');
+    } else {
+      refactoringSuggestions.push('Add brief explanatory comments documenting variable invariants and boundary conditions.');
+    }
+
+    return {
+      timeComplexity,
+      timeComplexityRationale,
+      spaceComplexity,
+      spaceComplexityRationale,
+      qualityScore: Math.min(100, Math.max(30, qualityScore)),
+      verdict: qualityScore >= 80 ? 'Production Ready & Optimal' : 'Working Solution with Optimization Potential',
+      strengths,
+      antiPatterns,
+      edgeCasesHandled,
+      edgeCasesMissing,
+      refactoringSuggestions,
+    };
+  }
+
+  /**
+   * Interviewing.io / Pramp Persona-Specific Interview Hints
+   */
+  async generateInterviewerHint(params: {
+    persona: 'maya' | 'rex' | 'sarah';
+    question: string;
+    currentCodeOrAnswer?: string;
+    attemptCount?: number;
+  }) {
+    const { persona, question, currentCodeOrAnswer } = params;
+    const count = params.attemptCount || 1;
+
+    switch (persona) {
+      case 'maya': // Mentor Maya: Warm, encouraging, conceptual
+        if (count === 1) {
+          return {
+            persona: 'Mentor Maya',
+            role: 'Senior Tech Mentor & College Placement Coach',
+            avatar: '👩‍🏫',
+            tone: 'Encouraging & Constructive',
+            hint: `Take a deep breath! You're in a great spot. First, re-read the problem statement and ask yourself: what is the brute-force way to solve this? Once we understand the O(N²) approach, what data structure lets us check elements in O(1) time?`,
+            followUpQuestion: 'Can you think of a data structure that maps keys to indices?',
+          };
+        } else if (count === 2) {
+          return {
+            persona: 'Mentor Maya',
+            role: 'Senior Tech Mentor & College Placement Coach',
+            avatar: '👩‍🏫',
+            tone: 'Encouraging & Constructive',
+            hint: `Try a Hash Map (or Dictionary in Python). As you iterate through the list, compute the required complement (e.g., target - currentNumber). If that complement exists in your map, you immediately have your answer!`,
+            followUpQuestion: 'What should we store as the key, and what as the value in the hash map?',
+          };
+        } else {
+          return {
+            persona: 'Mentor Maya',
+            role: 'Senior Tech Mentor & College Placement Coach',
+            avatar: '👩‍🏫',
+            tone: 'Encouraging & Constructive',
+            hint: `Here is the optimal pseudocode pattern:
+1. Initialize empty map 'seen = {}'.
+2. For index i, num in array:
+   - complement = target - num
+   - if complement in seen: return [seen[complement], i]
+   - seen[num] = i
+3. Return [] if no pair exists.`,
+            followUpQuestion: 'Does this handle duplicate numbers properly?',
+          };
+        }
+
+      case 'rex': // Bar-Raiser Rex: FAANG Principal, rigorous, edge-cases
+        if (count === 1) {
+          return {
+            persona: 'Bar-Raiser Rex',
+            role: 'FAANG Staff Engineer & Bar-Raiser',
+            avatar: '⚡',
+            tone: 'Hyper-Rigorous & Analytical',
+            hint: `If this service receives 100,000 requests per second and array size N reaches 10^6, an O(N²) solution is completely unacceptable—it will trigger CPU saturation. What invariant can you establish to achieve linear O(N) execution?`,
+            followUpQuestion: 'What are the space-time tradeoffs of caching intermediate states?',
+          };
+        } else {
+          return {
+            persona: 'Bar-Raiser Rex',
+            role: 'FAANG Staff Engineer & Bar-Raiser',
+            avatar: '⚡',
+            tone: 'Hyper-Rigorous & Analytical',
+            hint: `Maintain a one-pass hash index. Be ready to explain worst-case hash collision behavior (O(N) in malicious degenerate input) versus average case O(1). Also specify how your solution handles memory limits if N exceeds RAM capacity.`,
+            followUpQuestion: 'What happens if the array contains negative integers, zero, or duplicates?',
+          };
+        }
+
+      case 'sarah': // Sarah Jenkins: HR / Behavioral Director
+      default:
+        return {
+          persona: 'Sarah Jenkins',
+          role: 'Talent Acquisition Director & Culture Leader',
+          avatar: '💼',
+          tone: 'Empathetic & Structured',
+          hint: `In behavioral rounds, top candidates focus heavily on the 'Action' (A) and 'Result' (R) components of the STAR method. Avoid saying 'we did this'—anchor on what YOU specifically spearheaded, designed, or resolved when conflicts arose.`,
+          followUpQuestion: 'Can you share a concrete metric or percentage that measures the final outcome?',
+        };
+    }
+  }
+
+  /**
+   * Exponent-style System Design Studio Architecture Audit
+   */
+  async auditSystemDesign(params: {
+    prompt: string;
+    components: Array<{ id: string; type: string; label: string; connectsTo?: string[] }>;
+    traffic: {
+      dau?: number;
+      readRps?: number;
+      writeRps?: number;
+      storagePerDayGb?: number;
+    };
+  }) {
+    const { prompt, components = [], traffic } = params;
+
+    const compTypes = components.map((c) => c.type.toLowerCase());
+    const hasLB = compTypes.some((t) => t.includes('load') || t.includes('balancer') || t.includes('lb') || t.includes('gateway'));
+    const hasCache = compTypes.some((t) => t.includes('redis') || t.includes('memcached') || t.includes('cache'));
+    const hasDB = compTypes.some((t) => t.includes('sql') || t.includes('postgres') || t.includes('mongo') || t.includes('database') || t.includes('db'));
+    const hasQueue = compTypes.some((t) => t.includes('kafka') || t.includes('rabbit') || t.includes('queue') || t.includes('pubsub'));
+    const hasCDN = compTypes.some((t) => t.includes('cdn') || t.includes('cloudflare') || t.includes('s3'));
+
+    const readRps = traffic.readRps || 5000;
+    const writeRps = traffic.writeRps || 1000;
+    const dailyStorageGb = traffic.storagePerDayGb || 50;
+
+    let scalabilityScore = 50;
+    const strengths: string[] = [];
+    const vulnerabilities: string[] = [];
+    const recommendations: string[] = [];
+
+    if (hasLB) {
+      scalabilityScore += 15;
+      strengths.push('Load Balancer / API Gateway included: Distributes incoming HTTP/gRPC traffic across worker replicas.');
+    } else {
+      vulnerabilities.push('Single Point of Failure (SPOF): Direct client-to-service communication lacks reverse proxy and auto-scaling distribution.');
+      recommendations.push('Add an NGINX / AWS ALB Load Balancer between Clients and Microservices.');
+    }
+
+    if (hasCache) {
+      scalabilityScore += 15;
+      strengths.push('In-Memory Caching (Redis/Memcached): Protects primary database from read-heavy traffic spikes.');
+    } else if (readRps > 1000) {
+      vulnerabilities.push(`High Read Load (${readRps} RPS) directly hits database disks without a caching buffer.`);
+      recommendations.push('Introduce a Cache-Aside pattern using Redis to offload 80%+ of frequent read queries.');
+    }
+
+    if (hasQueue) {
+      scalabilityScore += 10;
+      strengths.push('Asynchronous Message Broker (Kafka/RabbitMQ): Decouples write operations and provides backpressure control.');
+    } else if (writeRps > 500) {
+      recommendations.push('Introduce Kafka or SQS to process high write throughput asynchronously without blocking clients.');
+    }
+
+    if (hasCDN) {
+      scalabilityScore += 10;
+      strengths.push('Edge CDN: Static assets and media files are cached geographically close to end users.');
+    }
+
+    if (hasDB) {
+      strengths.push('Persistent database tier configured.');
+    } else {
+      vulnerabilities.push('Missing persistent storage tier for durable transaction recording.');
+      recommendations.push('Provision PostgreSQL (with read replicas) or Cassandra for distributed persistence.');
+    }
+
+    // Traffic estimation calculations
+    const peakQps = Math.round(readRps * 2.5);
+    const annualStorageTb = Math.round(((dailyStorageGb * 365) / 1000) * 10) / 10;
+
+    return {
+      scalabilityScore: Math.min(100, Math.max(35, scalabilityScore)),
+      systemVerdict: scalabilityScore >= 80 ? 'Production-Ready Architecture' : 'Foundational Design with Bottlenecks',
+      strengths,
+      vulnerabilities,
+      recommendations,
+      trafficCalculations: {
+        readRps,
+        writeRps,
+        peakQps,
+        dailyStorageGb,
+        annualStorageTb,
+        networkBandwidthMbps: Math.round(((readRps * 2 + writeRps * 10) * 8) / 1000),
+      },
+      placementChecklist: [
+        { item: 'Stateless Application Tier', passed: hasLB },
+        { item: 'Sub-10ms Read Caching', passed: hasCache },
+        { item: 'Zero Data-Loss Persistence', passed: hasDB },
+        { item: 'Asynchronous Decoupling', passed: hasQueue },
+        { item: 'Global Edge Latency (CDN)', passed: hasCDN },
       ],
     };
   }

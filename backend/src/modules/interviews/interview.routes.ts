@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { prisma } from '../../prisma';
-import { requireAuth } from '../../middleware/auth.middleware';
+import { requireAuth, optionalAuth } from '../../middleware/auth.middleware';
 import { aiService } from '../../services/ai/ai.service';
 import { InterviewType, InterviewStatus } from '@prisma/client';
 
@@ -94,11 +94,11 @@ router.post('/:id/start', requireAuth, async (req: Request, res: Response) => {
 
     // Check if initial question already created
     if (interview.questions.length === 0) {
-      const q = await aiService.generateNextQuestion({
-        targetRole: interview.targetRole,
-        difficulty: interview.difficulty,
-        conversationHistory: [],
-      });
+      const q = await aiService.generateInitialQuestion(
+        interview.interviewType,
+        interview.targetRole,
+        interview.difficulty
+      );
 
       const question = await prisma.interviewQuestion.create({
         data: {
@@ -132,10 +132,11 @@ router.post('/:id/start', requireAuth, async (req: Request, res: Response) => {
   }
 });
 
-// Submit answer and receive next question or follow-up
+// Submit answer and receive immediate turn evaluation + dynamic adaptive follow-up
 router.post('/:id/answers', requireAuth, async (req: Request, res: Response) => {
   try {
     const { questionId, answerText, speechDurationSeconds } = req.body;
+    const cleanAnswer = typeof answerText === 'string' ? answerText.trim() : '';
 
     const interview = await prisma.interview.findUnique({
       where: { id: req.params.id },
@@ -151,13 +152,30 @@ router.post('/:id/answers', requireAuth, async (req: Request, res: Response) => 
       return res.status(404).json({ success: false, error: { message: 'Interview not found' } });
     }
 
-    // Save answer
+    const currentQuestion = interview.questions.find((q) => q.id === questionId) || interview.questions[interview.questions.length - 1];
+    if (!currentQuestion) {
+      return res.status(400).json({ success: false, error: { message: 'No question found to answer' } });
+    }
+
+    // 1. Evaluate candidate's turn answer FIRST
+    const turnEvaluation = await aiService.evaluateTurnAnswer(
+      interview.interviewType,
+      currentQuestion.questionText,
+      cleanAnswer,
+      interview.targetRole
+    );
+
+    // 2. Save answer with evaluation (linked to valid currentQuestion.id)
     const savedAnswer = await prisma.answer.create({
       data: {
-        interviewQuestionId: questionId,
+        interviewQuestionId: currentQuestion.id,
         userId: req.user!.userId,
-        answerText,
+        answerText: cleanAnswer,
         speechDurationSeconds: speechDurationSeconds || null,
+        score: Math.max(1, Math.min(5, Math.round((turnEvaluation.score / 20) * 10) / 10)),
+        feedback: turnEvaluation.feedback,
+        evidenceQuotes: turnEvaluation.strengths.slice(0, 2).concat(turnEvaluation.weaknesses.slice(0, 2)),
+        starComponents: turnEvaluation.starComponents ? turnEvaluation.starComponents : undefined,
       },
     });
 
@@ -165,8 +183,8 @@ router.post('/:id/answers', requireAuth, async (req: Request, res: Response) => 
     const history: { role: 'interviewer' | 'candidate'; text: string }[] = [];
     for (const q of interview.questions) {
       history.push({ role: 'interviewer', text: q.questionText });
-      if (q.id === questionId) {
-        history.push({ role: 'candidate', text: answerText });
+      if (q.id === currentQuestion.id) {
+        history.push({ role: 'candidate', text: cleanAnswer });
       } else if (q.answer) {
         history.push({ role: 'candidate', text: q.answer.answerText });
       }
@@ -178,17 +196,24 @@ router.post('/:id/answers', requireAuth, async (req: Request, res: Response) => 
         success: true,
         data: {
           answer: savedAnswer,
+          turnEvaluation,
           isComplete: true,
         },
       });
     }
 
-    // Generate next question
-    const nextQ = await aiService.generateNextQuestion({
-      targetRole: interview.targetRole,
-      difficulty: interview.difficulty,
-      conversationHistory: history,
-    });
+    // 3. Generate adaptive, non-static question directly tailored to candidate's answer
+    const nextQ = await aiService.generateAdaptiveTurn(
+      {
+        interviewType: interview.interviewType,
+        targetRole: interview.targetRole,
+        difficulty: interview.difficulty,
+        currentQuestionText: currentQuestion.questionText,
+        candidateAnswerText: cleanAnswer,
+        conversationHistory: history,
+      },
+      turnEvaluation
+    );
 
     const createdQuestion = await prisma.interviewQuestion.create({
       data: {
@@ -206,6 +231,7 @@ router.post('/:id/answers', requireAuth, async (req: Request, res: Response) => 
       success: true,
       data: {
         answer: savedAnswer,
+        turnEvaluation,
         nextQuestion: createdQuestion,
         isComplete: false,
       },
@@ -314,6 +340,32 @@ router.get('/:id/report', requireAuth, async (req: Request, res: Response) => {
         evaluation: interview.evaluation,
         questions: interview.questions,
       },
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: { message: err.message } });
+  }
+});
+
+// POST /api/v1/interviews/evaluate-technical - Rigorous technical answer evaluation
+router.post('/evaluate-technical', optionalAuth, async (req: Request, res: Response) => {
+  try {
+    const { question, answer, topic } = req.body;
+    if (!question || !answer) {
+      return res.status(400).json({
+        success: false,
+        error: { message: 'question and answer are required.' },
+      });
+    }
+
+    const result = await aiService.evaluateTechnicalAnswer(
+      question,
+      answer,
+      topic || 'Computer Science Fundamentals'
+    );
+
+    res.status(200).json({
+      success: true,
+      data: result,
     });
   } catch (err: any) {
     res.status(500).json({ success: false, error: { message: err.message } });

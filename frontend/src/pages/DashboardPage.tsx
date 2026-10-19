@@ -17,6 +17,7 @@ import {
   CheckCircle2,
   Clock,
   Sparkles,
+  Mic,
 } from 'lucide-react';
 
 interface DashboardMetrics {
@@ -89,10 +90,15 @@ export const DashboardPage: React.FC = () => {
           </p>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2.5">
+          <Link to="/voice">
+            <Button size="sm" variant="primary" leftIcon={<Mic className="w-4 h-4" />}>
+              Voice Studio
+            </Button>
+          </Link>
           <Link to="/interviews/hr">
-            <Button size="sm" variant="primary" leftIcon={<Users className="w-4 h-4" />}>
-              Start HR Mock
+            <Button size="sm" variant="outline" leftIcon={<Users className="w-4 h-4" />}>
+              HR Mock
             </Button>
           </Link>
           <Link to="/coding">

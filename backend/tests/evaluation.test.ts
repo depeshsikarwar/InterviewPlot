@@ -2,17 +2,16 @@ import { describe, it, expect } from 'vitest';
 import { aiService } from '../src/services/ai/ai.service';
 
 describe('Rigorous AI Evaluator Unit Tests', () => {
-  it('should give a failing score (<= 10) if the candidate only says "hello"', async () => {
+  it('should give a zero score (0/100) if the candidate only says "hello"', async () => {
     const question = 'Tell me about a challenging obstacle you faced in a project.';
     const answer = 'hello';
 
     const result = await aiService.evaluateHRAnswer(question, answer, 'Software Engineer');
 
-    expect(result.overallScore).toBeLessThanOrEqual(10);
-    expect(result.relevanceScore).toBe(1.0);
-    expect(result.structureScore).toBe(1.0);
+    expect(result.overallScore).toBe(0);
+    expect(result.relevanceScore).toBe(0);
     expect(result.weaknesses.some((w) => w.includes('hello'))).toBe(true);
-    expect(result.weaknesses.some((w) => w.includes('zero substantive content'))).toBe(true);
+    expect(result.weaknesses.some((w) => w.includes('CRITICAL NON-ANSWER'))).toBe(true);
   });
 
   it('should severely penalize very short answers (< 15 words)', async () => {
@@ -38,13 +37,13 @@ describe('Rigorous AI Evaluator Unit Tests', () => {
     expect(result.strengths.length).toBeGreaterThan(0);
   });
 
-  it('should fail trivial answers in technical interview evaluation', async () => {
+  it('should fail trivial answers in technical interview evaluation with 0 score', async () => {
     const question = 'Explain how a B-Tree index improves query speed in PostgreSQL.';
     const answer = 'hi';
 
     const result = await aiService.evaluateTechnicalAnswer(question, answer, 'DBMS');
 
-    expect(result.score).toBeLessThanOrEqual(10);
+    expect(result.score).toBe(0);
     expect(result.weaknesses.some((w) => w.includes('No technical explanation'))).toBe(true);
   });
 });
